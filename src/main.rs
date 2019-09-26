@@ -74,14 +74,15 @@ impl Rect {
 struct Tile {
     blocked: bool,
     block_sight: bool,
+    explored: bool,
 }
 
 impl Tile {
     pub fn empty() -> Self {
-        Tile { blocked: false, block_sight: false }
+        Tile { blocked: false, block_sight: false, explored: false }
     }
     pub fn wall() -> Self {
-        Tile { blocked: true, block_sight: true }
+        Tile { blocked: true, block_sight: true, explored: false }
     }
 }
 
@@ -174,7 +175,7 @@ fn make_map() -> (Map, (i32, i32)) {
     (map, starting_position)
 }
 
-fn render_all(root: &mut Root, con: &mut Offscreen, objects: &[Object], map: &Map, fov_map: &mut FovMap, fov_recompute: bool) {
+fn render_all(root: &mut Root, con: &mut Offscreen, objects: &[Object], map: &mut Map, fov_map: &mut FovMap, fov_recompute: bool) {
     for object in objects {
         if fov_map.is_in_fov(object.x, object.y) {
             object.draw(con);
@@ -194,7 +195,13 @@ fn render_all(root: &mut Root, con: &mut Offscreen, objects: &[Object], map: &Ma
                 (true, true) => COLOR_LIGHT_WALL,
                 (true, false) => COLOR_LIGHT_GROUND,
             };
-            con.set_char_background(x, y, color, BackgroundFlag::Set)
+            let explored = &mut map[x as usize][y as usize].explored;
+            if visible {
+                *explored = true;
+            }
+            if *explored {
+                con.set_char_background(x, y, color, BackgroundFlag::Set)
+            }
         }
     }
     blit(con,
@@ -237,7 +244,7 @@ fn main() {
         .title("Rusty Blade")
         .init();
 
-    let (map, (pos_x, pos_y)) = make_map();
+    let (mut map, (pos_x, pos_y)) = make_map();
 
     let mut con = Offscreen::new(MAP_WIDTH, MAP_HEIGHT);
     let player = Object::new(pos_x, pos_y, '@', WHITE);
@@ -268,7 +275,7 @@ fn main() {
             &mut root,
             &mut con,
             &objects,
-            &map,
+            &mut map,
             &mut fov_map,
             fov_recompute,
         );
