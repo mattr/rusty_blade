@@ -1,6 +1,8 @@
 use tcod::colors::*;
 use tcod::console::*;
 use tcod::console::FontType::Greyscale;
+use core::cmp;
+use rand::Rng;
 
 const SCREEN_WIDTH: i32 = 80;
 const SCREEN_HEIGHT: i32 = 50;
@@ -11,7 +13,43 @@ const MAP_HEIGHT: i32 = 45;
 const COLOR_DARK_WALL: Color = Color { r: 0, g: 0, b: 100 };
 const COLOR_DARK_GROUND: Color = Color { r: 50, g: 50, b: 150 };
 
+const ROOM_MAX_SIZE: i32 = 10;
+const ROOM_MIN_SIZE: i32 = 6;
+const MAX_ROOMS: i32 = 30;
+
 const LIMIT_FPS: i32 = 20;
+
+#[derive(Copy, Clone, Debug)]
+struct Rect {
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+}
+
+impl Rect {
+    pub fn new(x: i32, y: i32, w: i32, h: i32) -> Self {
+        Rect {
+            x1: x,
+            y1: y,
+            x2: x + w,
+            y2: y + h,
+        }
+    }
+
+    pub fn centre(&self) -> (i32, i32) {
+        let y = (self.y1 + self.y2) / 2;
+        let x = (self.x1 + self.x2) / 2;
+        return (x, y);
+    }
+
+    pub fn intersects_with(&self, other: &Rect) -> bool {
+        (self.x1 <= other.x2)
+            && (self.x2 >= other.x1)
+            && (self.y1 <= other.y2)
+            && (self.y2 >= other.y2)
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct Tile {
@@ -57,11 +95,64 @@ impl Object {
 
 type Map = Vec<Vec<Tile>>;
 
-fn make_map() -> Map {
-    let mut map = vec![vec![Tile::empty(); MAP_HEIGHT as usize]; MAP_WIDTH as usize];
-    map[30][22] = Tile::wall();
-    map[50][22] = Tile::wall();
-    map
+fn create_room(room: Rect, map: &mut Map) {
+    for x in (room.x1 + 1)..room.x2 {
+        for y in (room.y1 + 1)..room.y2 {
+            map[x as usize][y as usize] = Tile::empty();
+        }
+    }
+}
+
+fn create_h_tunnel(x1: i32, x2: i32, y: i32, map: &mut Map) {
+    for x in cmp::min(x1, x2)..(cmp::max(x1, x2) + 1) {
+        map[x as usize][y as usize] = Tile::empty();
+    }
+}
+
+fn create_v_tunnel(y1: i32, y2: i32, x: i32, map: &mut Map) {
+    for y in cmp::min(y1, y2)..(cmp::max(y1, y2) + 1) {
+        map[x as usize][y as usize] = Tile::empty();
+    }
+}
+
+fn make_map() -> (Map, (i32, i32)) {
+    let mut map = vec![vec![Tile::wall(); MAP_HEIGHT as usize]; MAP_WIDTH as usize];
+
+    let mut starting_position = (0, 0);
+    let mut rooms = vec![];
+
+    for _ in 1..MAX_ROOMS {
+        let w = rand::thread_rng().gen_range(ROOM_MIN_SIZE, ROOM_MAX_SIZE + 1);
+        let h = rand::thread_rng().gen_range(ROOM_MIN_SIZE, ROOM_MAX_SIZE + 1);
+
+        let x = rand::thread_rng().gen_range(0, MAP_WIDTH - w);
+        let y = rand::thread_rng().gen_range(0, MAP_HEIGHT - h);
+
+        let room = Rect::new(x, y, w, h);
+
+        let failed = rooms
+            .iter()
+            .any(|other| room.intersects_with(other));
+
+        if !failed {
+            create_room(room, &mut map);
+            let (x2, y2) = room.centre();
+            if rooms.is_empty() {
+                starting_position = (x2, y2);
+            } else {
+                let (x1, y1) = rooms[rooms.len() - 1].centre();
+                if rand::random() {
+                    create_h_tunnel(x1, x2, y1, &mut map);
+                    create_v_tunnel(y1, y2, x2, &mut map);
+                } else {
+                    create_v_tunnel(y1, y2, x1, &mut map);
+                    create_h_tunnel(x1, x2, y2, &mut map);
+                }
+            }
+            rooms.push(room);
+        }
+    }
+    (map, starting_position)
 }
 
 fn render_all(root: &mut Root, con: &mut Offscreen, objects: &[Object], map: &Map) {
@@ -118,12 +209,13 @@ fn main() {
         .title("Rusty Blade")
         .init();
 
+    let (map, (pos_x, pos_y)) = make_map();
+
     let mut con = Offscreen::new(MAP_WIDTH, MAP_HEIGHT);
-    let player = Object::new(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2, '@', WHITE);
+    let player = Object::new(pos_x, pos_y, '@', WHITE);
     let npc = Object::new(SCREEN_WIDTH / 2 - 5, SCREEN_HEIGHT / 2, '@', YELLOW);
     let mut objects = [player, npc];
 
-    let map = make_map();
 
     while !root.window_closed() {
         con.clear();
