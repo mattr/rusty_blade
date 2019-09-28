@@ -35,8 +35,17 @@ const COLOR_LIGHT_GROUND: Color = Color {
 const ROOM_MAX_SIZE: i32 = 10;
 const ROOM_MIN_SIZE: i32 = 6;
 const MAX_ROOMS: i32 = 30;
+const MAX_ROOM_MONSTERS: i32 = 3;
 
 const LIMIT_FPS: i32 = 20;
+const PLAYER: usize = 0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum PlayerAction {
+    TookTurn,
+    DidntTakeTurn,
+    Exit,
+}
 
 #[derive(Copy, Clone, Debug)]
 struct Rect {
@@ -91,24 +100,29 @@ struct Object {
     x: i32,
     y: i32,
     char: char,
+    name: String,
     color: Color,
+    blocks: bool,
+    alive: bool,
 }
 
 impl Object {
-    pub fn new(x: i32, y: i32, char: char, color: Color) -> Self {
-        Object { x, y, char, color }
-    }
-
-    pub fn move_by(&mut self, dx: i32, dy: i32, map: &Map) {
-        if !map[(self.x + dx) as usize][(self.y + dy) as usize].blocked {
-            self.x += dx;
-            self.y += dy;
-        }
+    pub fn new(x: i32, y: i32, char: char, name: &str, color: Color, blocks: bool) -> Self {
+        Object { x, y, char, name: name.into(), color, blocks, alive: false }
     }
 
     pub fn draw(&self, con: &mut dyn Console) {
         con.set_default_foreground(self.color);
         con.put_char(self.x, self.y, self.char, BackgroundFlag::None);
+    }
+
+    pub fn pos(&self) -> (i32, i32) {
+        (self.x, self.y)
+    }
+
+    pub fn set_pos(&mut self, x: i32, y: i32) {
+        self.x = x;
+        self.y = y;
     }
 }
 
@@ -135,10 +149,40 @@ fn create_v_tunnel(y1: i32, y2: i32, x: i32, map: &mut Map) {
     }
 }
 
-fn make_map() -> (Map, (i32, i32)) {
+fn place_objects(room: Rect, objects: &mut Vec<Object>) {
+    let num_monsters = rand::thread_rng().gen_range(0, MAX_ROOM_MONSTERS + 1);
+    for _ in 0..num_monsters {
+        let x = rand::thread_rng().gen_range(room.x1 + 1, room.x2);
+        let y = rand::thread_rng().gen_range(room.y1 + 1, room.y2);
+        let mut monster = if rand::random::<f32>() < 0.8 {
+            Object::new(x, y, 'o', "Orc", DARK_GREEN, true)
+        } else {
+            Object::new(x, y, 'T', "Troll", DARKER_GREEN, true)
+        };
+        monster.alive = true;
+        objects.push(monster);
+    }
+}
+
+fn is_blocked(x: i32, y: i32, map: &Map, objects: &[Object]) -> bool {
+    if map[x as usize][y as usize].blocked {
+        return true;
+    }
+    objects.iter().any(|object| {
+        object.blocks && object.pos() == (x, y)
+    })
+}
+
+fn move_by(id: usize, dx: i32, dy: i32, map: &Map, objects: &mut [Object]) {
+    let (x, y) = objects[id].pos();
+    if !is_blocked(x + dx, y + dy, map, objects) {
+        objects[id].set_pos(x + dx, y + dy);
+    }
+}
+
+fn make_map(objects: &mut Vec<Object>) -> Map {
     let mut map = vec![vec![Tile::wall(); MAP_HEIGHT as usize]; MAP_WIDTH as usize];
 
-    let mut starting_position = (0, 0);
     let mut rooms = vec![];
 
     for _ in 1..MAX_ROOMS {
@@ -156,9 +200,10 @@ fn make_map() -> (Map, (i32, i32)) {
 
         if !failed {
             create_room(room, &mut map);
+            place_objects(room, objects);
             let (x2, y2) = room.centre();
             if rooms.is_empty() {
-                starting_position = (x2, y2);
+                objects[PLAYER].set_pos(x2, y2);
             } else {
                 let (x1, y1) = rooms[rooms.len() - 1].centre();
                 if rand::random() {
@@ -172,66 +217,102 @@ fn make_map() -> (Map, (i32, i32)) {
             rooms.push(room);
         }
     }
-    (map, starting_position)
+    map
 }
 
 fn render_all(root: &mut Root, con: &mut Offscreen, objects: &[Object], map: &mut Map, fov_map: &mut FovMap, fov_recompute: bool) {
-    for object in objects {
-        if fov_map.is_in_fov(object.x, object.y) {
-            object.draw(con);
-        }
-    }
     if fov_recompute {
-        let player = &objects[0];
+        // recompute FOV if needed (the player moved or something)
+        let player = &objects[PLAYER];
         fov_map.compute_fov(player.x, player.y, TORCH_RADIUS, FOV_LIGHT_WALLS, FOV_ALGO);
     }
+
+    // go through all tiles, and set their background color
     for y in 0..MAP_HEIGHT {
         for x in 0..MAP_WIDTH {
             let visible = fov_map.is_in_fov(x, y);
             let wall = map[x as usize][y as usize].block_sight;
             let color = match (visible, wall) {
+                // outside of field of view:
                 (false, true) => COLOR_DARK_WALL,
                 (false, false) => COLOR_DARK_GROUND,
+                // inside fov:
                 (true, true) => COLOR_LIGHT_WALL,
                 (true, false) => COLOR_LIGHT_GROUND,
             };
+
             let explored = &mut map[x as usize][y as usize].explored;
             if visible {
+                // since it's visible, explore it
                 *explored = true;
             }
             if *explored {
-                con.set_char_background(x, y, color, BackgroundFlag::Set)
+                // show explored tiles only (any visible tile is explored already)
+                con.set_char_background(x, y, color, BackgroundFlag::Set);
             }
         }
     }
-    blit(con,
-         (0, 0),
-         (MAP_WIDTH, MAP_HEIGHT),
-         root,
-         (0, 0),
-         1.0,
-         1.0);
-}
 
-fn handle_keys(root: &mut Root, player: &mut Object, map: &Map) -> bool {
-    use tcod::input::Key;
-    use tcod::input::KeyCode::*;
-
-    let key = root.wait_for_keypress(true);
-    match key {
-        Key { code: Enter, alt: true, .. } => {
-            let fullscreen = root.is_fullscreen();
-            root.set_fullscreen(!fullscreen);
+    // draw all objects in the list
+    for object in objects {
+        if fov_map.is_in_fov(object.x, object.y) {
+            object.draw(con);
         }
-        Key { code: Escape, .. } => return true,
-        Key { code: Up, .. } => player.move_by(0, -1, map),
-        Key { code: Down, .. } => player.move_by(0, 1, map),
-        Key { code: Left, .. } => player.move_by(-1, 0, map),
-        Key { code: Right, .. } => player.move_by(1, 0, map),
-        _ => {}
     }
 
-    false
+    // blit the contents of "con" to the root console
+    blit(con, (0, 0), (MAP_WIDTH, MAP_HEIGHT), root, (0, 0), 1.0, 1.0);
+}
+
+fn handle_keys(root: &mut Root, map: &Map, objects: &mut [Object]) -> PlayerAction {
+    use tcod::input::Key;
+    use tcod::input::KeyCode::*;
+    use PlayerAction::*;
+
+    let key = root.wait_for_keypress(true);
+    let player_alive = objects[PLAYER].alive;
+    match (key, player_alive) {
+        (Key { code: Enter, alt: true, .. }, _) => {
+            let fullscreen = root.is_fullscreen();
+            root.set_fullscreen(!fullscreen);
+            DidntTakeTurn
+        }
+        (Key { code: Escape, .. }, _) => Exit,
+        (Key { code: Up, .. }, true) => {
+            player_move_or_attack(0, -1, map, objects);
+            TookTurn
+        }
+        (Key { code: Down, .. }, true) => {
+            player_move_or_attack(0, 1, map, objects);
+            TookTurn
+        }
+        (Key { code: Left, .. }, true) => {
+            player_move_or_attack(-1, 0, map, objects);
+            TookTurn
+        }
+        (Key { code: Right, .. }, true) => {
+            player_move_or_attack(1, 0, map, objects);
+            TookTurn
+        }
+        (_, _) => DidntTakeTurn
+    }
+}
+
+fn player_move_or_attack(dx: i32, dy: i32, map: &Map, objects: &mut [Object]) {
+    let x = objects[PLAYER].x + dx;
+    let y = objects[PLAYER].y + dy;
+    let target_id = objects.iter().position(|object| object.pos() == (x, y));
+    match target_id {
+        Some(target_id) => {
+            println!(
+                "The {} laughs at your puny efforts to attack him!",
+                objects[target_id].name
+            );
+        }
+        None => {
+            move_by(PLAYER, dx, dy, map, objects);
+        }
+    }
 }
 
 fn main() {
@@ -244,14 +325,14 @@ fn main() {
         .title("Rusty Blade")
         .init();
 
-    let (mut map, (pos_x, pos_y)) = make_map();
-
     let mut con = Offscreen::new(MAP_WIDTH, MAP_HEIGHT);
-    let player = Object::new(pos_x, pos_y, '@', WHITE);
-    let npc = Object::new(SCREEN_WIDTH / 2 - 5, SCREEN_HEIGHT / 2, '@', YELLOW);
-    let mut objects = [player, npc];
+    let mut player = Object::new(0, 0, '@', "player", WHITE, true);
+    player.alive = true;
+    let mut objects = vec![player];
+    let mut map = make_map(&mut objects);
 
     let mut fov_map = FovMap::new(MAP_WIDTH, MAP_HEIGHT);
+
 
     for y in 0..MAP_HEIGHT {
         for x in 0..MAP_WIDTH {
@@ -267,10 +348,7 @@ fn main() {
 
     while !root.window_closed() {
         con.clear();
-        for object in &objects {
-            object.draw(&mut con);
-        }
-        let fov_recompute = prev_player_position != (objects[0].x, objects[0].y);
+        let fov_recompute = prev_player_position != (objects[PLAYER].pos());
         render_all(
             &mut root,
             &mut con,
@@ -280,12 +358,19 @@ fn main() {
             fov_recompute,
         );
         root.flush();
-        let player = &mut objects[0];
 
-        prev_player_position = (player.x, player.y);
-        let exit = handle_keys(&mut root, player, &map);
-        if exit {
+        prev_player_position = objects[PLAYER].pos();
+        let player_action = handle_keys(&mut root, &map, &mut objects);
+        if player_action == PlayerAction::Exit {
             break;
+        }
+
+        if objects[PLAYER].alive && player_action != PlayerAction::DidntTakeTurn {
+            for object in &objects {
+                if (object as *const _) != (&objects[PLAYER] as *const _) {
+                    println!("The {} growls!", object.name);
+                }
+            }
         }
     }
 }
